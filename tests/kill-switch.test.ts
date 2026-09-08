@@ -1,12 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 
-import { broker, cancelOrder, getOrders, placeOrder } from "./helpers/setup";
+import { broker, cancelOrder, getOrders, placeOrder, reset } from "./helpers/setup";
 
 const buy = { tradingsymbol: "INFY", quantity: 1, transaction_type: "BUY" } as const;
 
-afterEach(() => {
-    process.env.KITE_TRADING_ENABLED = "true";
-});
+beforeEach(reset);
 
 test("refuses orders while trading is disabled", async () => {
     process.env.KITE_TRADING_ENABLED = "false";
@@ -22,8 +20,6 @@ test("refuses orders when the switch is simply unset", async () => {
 
 test("does not reach the broker at all", async () => {
     process.env.KITE_TRADING_ENABLED = "false";
-    broker.placedTags = [];
-
     await placeOrder(buy).catch(() => {});
 
     expect(broker.placedTags).toBeEmpty();
@@ -33,14 +29,11 @@ test("does not reach the broker at all", async () => {
 // hold would be the wrong failure, so reads and cancels stay available.
 test("still allows reading the order book", async () => {
     process.env.KITE_TRADING_ENABLED = "false";
-    broker.book = [];
-
     expect(await getOrders()).toEqual([]);
 });
 
 test("still allows cancelling an open order", async () => {
     process.env.KITE_TRADING_ENABLED = "false";
-    broker.cancels = [];
     broker.book = [
         {
             order_id: "OPEN1",

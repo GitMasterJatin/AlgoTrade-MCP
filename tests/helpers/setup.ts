@@ -21,3 +21,14 @@ process.env.KITE_API_ROOT = broker.root;
 process.env.KITE_TRADING_ENABLED = "true";
 
 export const { placeOrder, cancelOrder, getOrders } = await import("../../trade");
+
+/**
+ * Puts the broker and the environment back to a known state. Every test file
+ * calls this in beforeEach: with one shared process, a test that relies on the
+ * previous file having tidied up is a test that fails depending on file order.
+ */
+export function reset() {
+    broker.reset();
+    process.env.KITE_TRADING_ENABLED = "true";
+    delete process.env.KITE_MAX_ORDER_VALUE;
+}

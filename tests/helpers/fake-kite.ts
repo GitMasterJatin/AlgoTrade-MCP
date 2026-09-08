@@ -25,6 +25,8 @@ export class FakeKite {
     book: Order[] = [];
     placeMode: PlaceMode = "ok";
     bookReadable = true;
+    /** Last traded price returned by /quote/ltp. */
+    lastPrice: number | null = 100;
     /** Every cancel the broker received, in order. */
     cancels: { variety: string; order_id: string }[] = [];
     /** Every tag the broker was asked to place, in order. */
@@ -32,6 +34,21 @@ export class FakeKite {
 
     private server?: Server;
     port = 0;
+
+    /**
+     * `bun test` shares one process, so files inherit whatever the previous one
+     * left behind. Every file resets in beforeEach rather than tidying up after
+     * itself, so a test never depends on another file being well behaved.
+     */
+    reset() {
+        this.book = [];
+        this.cancels = [];
+        this.placedTags = [];
+        this.placeMode = "ok";
+        this.bookReadable = true;
+        this.lastPrice = 100;
+        return this;
+    }
 
     async start() {
         this.server = createServer(async (req, res) => {
@@ -42,6 +59,21 @@ export class FakeKite {
                 res.statusCode = code;
                 res.end(JSON.stringify({ status: "error", error_type, message }));
             };
+
+            if (req.method === "GET" && pathname === "/quote/ltp") {
+                if (this.lastPrice === null) {
+                    return fail(503, "NetworkException", "quotes unavailable");
+                }
+                const instrument = new URL(req.url ?? "/", "http://fake").searchParams.get("i")!;
+                return res.end(
+                    JSON.stringify({
+                        status: "success",
+                        data: {
+                            [instrument]: { instrument_token: 1, last_price: this.lastPrice },
+                        },
+                    }),
+                );
+            }
 
             if (req.method === "GET" && pathname === "/orders") {
                 if (!this.bookReadable) {

@@ -35,6 +35,15 @@ switch to flip when something looks wrong. Reads and cancels keep working while
 it's off — the point is to stop new exposure, and not being able to close a
 position you already hold would be the wrong failure.
 
+Single orders are also capped, at ₹10,000 unless you say otherwise:
+
+```bash
+export KITE_MAX_ORDER_VALUE=25000
+```
+
+The default is deliberately small, so turning trading on without thinking about
+limits can't do much damage.
+
 Kite's login hands you a **request token** that works exactly once and expires
 in minutes, which you trade for an access token good until 6am the next day. So
 logging in is two steps:
@@ -110,6 +119,22 @@ book itself can't be read, the server says **UNKNOWN** and hands you the tag to
 check by hand. It never guesses "not placed," because a live order reported as
 unplaced is the mistake that costs you money.
 
+### The value cap has to fail closed
+
+A limit order carries its own price, so capping it is arithmetic. A market
+order doesn't, so it's valued off the last traded price — plus 5%, because a
+market order can fill worse than the last trade and the estimate should err
+towards refusing.
+
+The part that matters is what happens when that price lookup fails. The order
+is refused. A cap that quietly switches itself off the moment a quote is
+unavailable isn't a cap, and "the market data feed is having a bad minute" is
+exactly when you'd rather not be sending orders anyway.
+
+It applies to sells too. An oversized sell is the same fat finger, and unlike
+the kill switch this is a standing config you size to your account once, not an
+emergency lever you reach for mid-incident.
+
 ### Cancelling is not one endpoint
 
 Kite cancels at `/orders/{variety}/{order_id}`, and *variety* isn't always
@@ -156,7 +181,7 @@ reaching the model as `[object Object]`. They now carry the real reason.
 bun test
 ```
 
-31 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
+39 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
 Zerodha (`tests/helpers/fake-kite.ts`) that can be told to fail in specific
 ways, so the paths that are otherwise impossible to reach on purpose — a
 placement whose response is lost, an unreadable order book, an order that's
@@ -171,9 +196,9 @@ same way a client would.
 
 Worth being straight about, because some of it matters:
 
-- **There's no risk layer beyond the on/off switch.** No order-value cap, no
-  position limits, no daily loss limit. With trading enabled, the model can
-  place any order the schema allows. This is the biggest gap and I know it.
+- **Risk stops at the per-order level.** There's a kill switch and a value cap,
+  but no position limits, no daily loss limit, and nothing that looks at your
+  portfolio as a whole. Ten orders just under the cap are ten orders.
 - **It's never run against a funded account.** Everything here is built against
   Kite Connect's documented v3 contract and verified against a local fake.
 - **`SL` and `SL-M` are offered but can't work** — they need a `trigger_price`

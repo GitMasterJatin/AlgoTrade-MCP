@@ -1,14 +1,12 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
-import { broker, placeOrder } from "./helpers/setup";
+import { broker, placeOrder, reset } from "./helpers/setup";
 
 const buy = { tradingsymbol: "INFY", quantity: 1, transaction_type: "BUY" } as const;
 
+beforeEach(reset);
+
 describe("placing an order", () => {
-    beforeAll(() => {
-        broker.book = [];
-        broker.placedTags = [];
-    });
 
     test("returns the order id and the tag it was placed under", async () => {
         broker.placeMode = "ok";

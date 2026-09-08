@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import type { Order } from "./helpers/fake-kite";
-import { broker, cancelOrder, getOrders } from "./helpers/setup";
+import { broker, cancelOrder, getOrders, reset } from "./helpers/setup";
 
 const order = (o: Partial<Order> & { order_id: string }): Order => ({
     variety: "regular",
@@ -14,7 +14,7 @@ const order = (o: Partial<Order> & { order_id: string }): Order => ({
 });
 
 beforeEach(() => {
-    broker.cancels = [];
+    reset();
     broker.book = [
         order({ order_id: "OPEN1" }),
         order({ order_id: "AMO1", variety: "amo" }),

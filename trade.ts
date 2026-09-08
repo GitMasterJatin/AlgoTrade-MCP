@@ -123,6 +123,81 @@ function assertTradingEnabled() {
     }
 }
 
+/** Rupees. Deliberately small, so enabling trading without thinking is cheap. */
+const DEFAULT_MAX_ORDER_VALUE = 10_000;
+
+/** A market order can fill worse than the last trade, so estimate high. */
+const SLIPPAGE_ALLOWANCE = 1.05;
+
+function maxOrderValue(): number {
+    const raw = process.env.KITE_MAX_ORDER_VALUE;
+    if (raw === undefined) return DEFAULT_MAX_ORDER_VALUE;
+
+    const cap = Number(raw);
+    if (!Number.isFinite(cap) || cap <= 0) {
+        throw new Error(
+            `KITE_MAX_ORDER_VALUE must be a positive number, got "${raw}". ` +
+                "No order was placed.",
+        );
+    }
+    return cap;
+}
+
+/**
+ * Refuses orders worth more than the cap, to catch a misplaced zero or a
+ * hallucinated quantity before it reaches the exchange.
+ *
+ * Fails closed: if the price cannot be established the order is refused, since
+ * a limit that switches itself off when a lookup fails is not a limit. Applies
+ * to sells too — an oversized sell is the same fat finger, and unlike the kill
+ * switch this is a standing config you size to your account, not an emergency
+ * lever you reach for mid-incident.
+ */
+async function assertWithinValueCap(
+    kc: Connect,
+    order: { exchange: string; tradingsymbol: string; quantity: number },
+    orderType: OrderMode,
+    price: number | undefined,
+) {
+    const cap = maxOrderValue();
+    const instrument = `${order.exchange}:${order.tradingsymbol}`;
+    let unitPrice: number;
+    let basis: string;
+
+    if (orderType !== "MARKET" && price) {
+        // A limit price is the most you would pay per share, so it is exact.
+        unitPrice = price;
+        basis = `limit price ${price}`;
+    } else {
+        let lastPrice: number | undefined;
+        try {
+            lastPrice = (await kc.getLTP(instrument))[instrument]?.last_price;
+        } catch (err) {
+            throw new Error(
+                `Cannot price ${instrument} to check the order value cap ` +
+                    `(${toError(err).message}). No order was placed.`,
+            );
+        }
+        if (!lastPrice) {
+            throw new Error(
+                `No last price for ${instrument}, so the order value cap cannot ` +
+                    "be checked. No order was placed.",
+            );
+        }
+        unitPrice = lastPrice * SLIPPAGE_ALLOWANCE;
+        basis = `last price ${lastPrice} plus 5% for slippage`;
+    }
+
+    const value = unitPrice * order.quantity;
+    if (value > cap) {
+        throw new Error(
+            `Order value is about ${Math.round(value)} (${order.quantity} x ` +
+                `${basis}), over the ${cap} cap. No order was placed. ` +
+                "Raise KITE_MAX_ORDER_VALUE to allow it.",
+        );
+    }
+}
+
 export async function placeOrder({
     tradingsymbol,
     quantity,
@@ -135,6 +210,15 @@ export async function placeOrder({
     assertTradingEnabled();
 
     const kc = getClient();
+
+    // Both checks run before a tag exists, so a refused order leaves nothing
+    // to reconcile.
+    await assertWithinValueCap(
+        kc,
+        { exchange, tradingsymbol, quantity },
+        order_type,
+        price,
+    );
 
     // Stamped so a failed placement can be resolved against the order book.
     const tag = newTag();
