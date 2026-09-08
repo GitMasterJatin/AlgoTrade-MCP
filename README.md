@@ -1,5 +1,7 @@
 # AlgoTrade-MCP
 
+[![CI](https://github.com/GitMasterJatin/AlgoTrade-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/GitMasterJatin/AlgoTrade-MCP/actions/workflows/ci.yml)
+
 An MCP server that lets a language model trade on your Zerodha account.
 
 Five tools — buy, sell, cancel, and look at your orders and portfolio — over
