@@ -1,7 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
 import { KiteConnect } from "kiteconnect";
+import type { Connect, Exchanges } from "kiteconnect";
 
 type OrderType = "BUY" | "SELL";
-type ProductType = "CNC" | "MIS" | "NRML" | "BO" | "CO";
+type ProductType = "CNC" | "MIS" | "NRML";
 type OrderMode = "MARKET" | "LIMIT" | "SL" | "SL-M";
 
 type PlaceOrderInput = {
@@ -14,20 +18,36 @@ type PlaceOrderInput = {
     price?: number;
 };
 
-const apiKey = process.env.KITE_API_KEY ?? "";
-const apiSecret = process.env.KITE_API_SECRET ?? "";
-const requestToken = process.env.KITE_REQUEST_TOKEN ?? "";
+export const SESSION_FILE = path.join(import.meta.dir, ".kite-session.json");
 
-const kc = new KiteConnect({ api_key: apiKey });
+let client: Connect | null = null;
 
-async function generateSession() {
-    if (!apiKey || !apiSecret || !requestToken) {
-        throw new Error("Set KITE_API_KEY, KITE_API_SECRET, and KITE_REQUEST_TOKEN");
+/**
+ * Returns the one authenticated client for this process.
+ *
+ * Deliberately synchronous: the memo assignment cannot be interleaved, so
+ * concurrent callers (e.g. show_portfolio's Promise.all) share a single client
+ * by construction rather than racing to build their own.
+ */
+function getClient(): Connect {
+    if (client) return client;
+
+    const apiKey = process.env.KITE_API_KEY;
+    if (!apiKey) throw new Error("KITE_API_KEY is not set");
+
+    if (!existsSync(SESSION_FILE)) {
+        throw new Error("No Kite session. Run: bun run login");
     }
 
-    const response = await kc.generateSession(requestToken, apiSecret);
-    kc.setAccessToken(response.access_token);
-    return response;
+    const { access_token } = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+    if (!access_token) {
+        throw new Error("Kite session file has no access_token. Run: bun run login");
+    }
+
+    const kc = new KiteConnect({ api_key: apiKey });
+    kc.setAccessToken(access_token);
+    client = kc;
+    return kc;
 }
 
 export async function placeOrder({
@@ -39,71 +59,25 @@ export async function placeOrder({
     order_type = "MARKET",
     price,
 }: PlaceOrderInput) {
-    if (!apiKey || !apiSecret || !requestToken) {
-        return {
-            status: "missing_credentials",
-            message: "Set KITE_API_KEY, KITE_API_SECRET, and KITE_REQUEST_TOKEN",
-        };
-    }
+    const payload: Parameters<Connect["placeOrder"]>[1] = {
+        exchange: exchange as Exchanges,
+        tradingsymbol,
+        transaction_type,
+        quantity,
+        product,
+        order_type,
+        ...(order_type === "LIMIT" || order_type === "SL" || order_type === "SL-M"
+            ? { price: price ?? 0 }
+            : {}),
+    };
 
-    try {
-        await generateSession();
-
-        const payload: any = {
-            exchange,
-            tradingsymbol,
-            transaction_type,
-            quantity,
-            product,
-            order_type,
-            ...(order_type === "LIMIT" || order_type === "SL" || order_type === "SL-M"
-                ? { price: price ?? 0 }
-                : {}),
-        };
-
-        return await kc.placeOrder("regular", payload);
-    } catch (err) {
-        return {
-            status: "error",
-            message: err instanceof Error ? err.message : String(err),
-        };
-    }
+    return getClient().placeOrder("regular", payload);
 }
 
 export async function getHoldings() {
-    if (!apiKey || !apiSecret || !requestToken) {
-        return {
-            status: "missing_credentials",
-            message: "Set KITE_API_KEY, KITE_API_SECRET, and KITE_REQUEST_TOKEN",
-        };
-    }
-
-    try {
-        await generateSession();
-        return await kc.getHoldings();
-    } catch (err) {
-        return {
-            status: "error",
-            message: err instanceof Error ? err.message : String(err),
-        };
-    }
+    return getClient().getHoldings();
 }
 
 export async function getPositions() {
-    if (!apiKey || !apiSecret || !requestToken) {
-        return {
-            status: "missing_credentials",
-            message: "Set KITE_API_KEY, KITE_API_SECRET, and KITE_REQUEST_TOKEN",
-        };
-    }
-
-    try {
-        await generateSession();
-        return await kc.getPositions();
-    } catch (err) {
-        return {
-            status: "error",
-            message: err instanceof Error ? err.message : String(err),
-        };
-    }
+    return getClient().getPositions();
 }
