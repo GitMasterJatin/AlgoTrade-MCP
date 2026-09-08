@@ -18,7 +18,9 @@ type PlaceOrderInput = {
     price?: number;
 };
 
-export const SESSION_FILE = path.join(import.meta.dir, ".kite-session.json");
+/** Where the access token lives. Override to keep it outside the repo. */
+export const SESSION_FILE =
+    process.env.KITE_SESSION_FILE ?? path.join(import.meta.dir, ".kite-session.json");
 
 let client: Connect | null = null;
 

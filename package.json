@@ -16,6 +16,8 @@
   },
   "scripts": {
     "start": "bun run index.ts",
-    "login": "bun run login.ts"
+    "login": "bun run login.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   }
 }

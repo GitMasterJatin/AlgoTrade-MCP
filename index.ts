@@ -18,6 +18,7 @@ server.registerTool(
             order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
             price: z.number().optional(),
         }),
+        annotations: { destructiveHint: true },
     },
     async ({ tradingsymbol, quantity, exchange, product, order_type, price }) => {
         const result = await placeOrder({
@@ -48,6 +49,7 @@ server.registerTool(
             order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
             price: z.number().optional(),
         }),
+        annotations: { destructiveHint: true },
     },
     async ({ tradingsymbol, quantity, exchange, product, order_type, price }) => {
         const result = await placeOrder({
@@ -71,6 +73,7 @@ server.registerTool(
     {
         description: 'Shows my complete portfolio and positions in Zerodha',
         inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
     },
     async () => {
         const [holdings, positions] = await Promise.all([getHoldings(), getPositions()]);
