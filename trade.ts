@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { KiteConnect } from "kiteconnect";
-import type { Connect, Exchanges } from "kiteconnect";
+import type { Connect, Exchanges, Variety } from "kiteconnect";
 
 type OrderType = "BUY" | "SELL";
 type ProductType = "CNC" | "MIS" | "NRML";
@@ -44,7 +44,9 @@ function getClient(): Connect {
         throw new Error("Kite session file has no access_token. Run: bun run login");
     }
 
-    const kc = new KiteConnect({ api_key: apiKey });
+    // KITE_API_ROOT points the client at Kite's sandbox or a local mock.
+    const root = process.env.KITE_API_ROOT;
+    const kc = new KiteConnect({ api_key: apiKey, ...(root && { root }) });
     kc.setAccessToken(access_token);
     client = kc;
     return kc;
@@ -72,6 +74,58 @@ export async function placeOrder({
     };
 
     return getClient().placeOrder("regular", payload);
+}
+
+/**
+ * Order statuses that can never be cancelled.
+ *
+ * Deliberately a denylist: Kite documents status as open-ended ("There may be
+ * other values as well"), so an allowlist of pending states would be
+ * incomplete and would refuse legitimate cancels.
+ */
+const TERMINAL_STATUSES = new Set(["COMPLETE", "CANCELLED", "REJECTED"]);
+
+export async function getOrders() {
+    return getClient().getOrders();
+}
+
+export async function cancelOrder(orderId: string) {
+    const kc = getClient();
+
+    // Look the order up rather than trusting a caller-supplied variety: the
+    // book also holds amo/co/iceberg orders placed outside this server, and
+    // cancelling those with the wrong variety fails.
+    const order = (await kc.getOrders()).find((o) => o.order_id === orderId);
+    if (!order) {
+        throw new Error(`No order ${orderId} in today's order book.`);
+    }
+
+    const status = order.status.toUpperCase();
+    if (TERMINAL_STATUSES.has(status)) {
+        throw new Error(
+            status === "COMPLETE"
+                ? `Order ${orderId} already filled ${order.filled_quantity} ` +
+                  `${order.tradingsymbol} and cannot be cancelled. ` +
+                  `To reverse it, place an opposing order.`
+                : `Order ${orderId} is ${order.status}; nothing to cancel.`,
+        );
+    }
+
+    await kc.cancelOrder(order.variety as Variety, orderId);
+
+    return {
+        order_id: orderId,
+        tradingsymbol: order.tradingsymbol,
+        cancelled_quantity: order.pending_quantity,
+        filled_quantity: order.filled_quantity,
+        // A partial fill survives the cancel. Without this the caller reads
+        // "cancelled" and believes the position is flat.
+        ...(order.filled_quantity > 0 && {
+            warning:
+                `${order.filled_quantity} of ${order.quantity} had already filled. ` +
+                `That part is NOT cancelled - you hold it.`,
+        }),
+    };
 }
 
 export async function getHoldings() {
