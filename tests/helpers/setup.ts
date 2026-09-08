@@ -18,5 +18,6 @@ writeFileSync(session, JSON.stringify({ access_token: "fake-token" }));
 process.env.KITE_API_KEY = "fake-key";
 process.env.KITE_SESSION_FILE = session;
 process.env.KITE_API_ROOT = broker.root;
+process.env.KITE_TRADING_ENABLED = "true";
 
 export const { placeOrder, cancelOrder, getOrders } = await import("../../trade");

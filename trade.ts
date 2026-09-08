@@ -107,6 +107,22 @@ async function findByTag(kc: Connect, tag: string, attempts = 3) {
     return { hit: undefined, bookRead };
 }
 
+/**
+ * Orders are refused unless KITE_TRADING_ENABLED is set to "true".
+ *
+ * Reads and cancels are deliberately unaffected: the switch exists to stop new
+ * exposure, and being unable to close a position you already hold is the wrong
+ * failure. Off by default, so an accidental run cannot spend anything.
+ */
+function assertTradingEnabled() {
+    if (process.env.KITE_TRADING_ENABLED !== "true") {
+        throw new Error(
+            "Trading is disabled. No order was placed. " +
+                "Set KITE_TRADING_ENABLED=true to allow orders.",
+        );
+    }
+}
+
 export async function placeOrder({
     tradingsymbol,
     quantity,
@@ -116,6 +132,8 @@ export async function placeOrder({
     order_type = "MARKET",
     price,
 }: PlaceOrderInput) {
+    assertTradingEnabled();
+
     const kc = getClient();
 
     // Stamped so a failed placement can be resolved against the order book.

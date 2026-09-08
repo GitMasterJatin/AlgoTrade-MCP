@@ -24,6 +24,17 @@ export KITE_API_KEY=your_key
 export KITE_API_SECRET=your_secret
 ```
 
+Orders are refused until you also set this:
+
+```bash
+export KITE_TRADING_ENABLED=true
+```
+
+It's off by default so an accidental run can't spend anything, and it's the
+switch to flip when something looks wrong. Reads and cancels keep working while
+it's off — the point is to stop new exposure, and not being able to close a
+position you already hold would be the wrong failure.
+
 Kite's login hands you a **request token** that works exactly once and expires
 in minutes, which you trade for an access token good until 6am the next day. So
 logging in is two steps:
@@ -51,7 +62,11 @@ Then point your MCP client at it:
     "zerodha": {
       "command": "bun",
       "args": ["run", "/absolute/path/to/AlgoTrade-MCP/index.ts"],
-      "env": { "KITE_API_KEY": "...", "KITE_API_SECRET": "..." }
+      "env": {
+        "KITE_API_KEY": "...",
+        "KITE_API_SECRET": "...",
+        "KITE_TRADING_ENABLED": "true"
+      }
     }
   }
 }
@@ -61,7 +76,7 @@ Then point your MCP client at it:
 
 | Tool | What it does |
 |---|---|
-| `buy_stock` / `sell_stock` | Place an order. Market by default; CNC, MIS or NRML. |
+| `buy_stock` / `sell_stock` | Place an order. Market by default; CNC, MIS or NRML. Needs `KITE_TRADING_ENABLED=true`. |
 | `cancel_order` | Cancel a pending order by id. |
 | `get_orders` | Today's order book, with status and fill quantity. |
 | `show_portfolio` | Holdings and positions. |
@@ -141,7 +156,7 @@ reaching the model as `[object Object]`. They now carry the real reason.
 bun test
 ```
 
-26 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
+31 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
 Zerodha (`tests/helpers/fake-kite.ts`) that can be told to fail in specific
 ways, so the paths that are otherwise impossible to reach on purpose — a
 placement whose response is lost, an unreadable order book, an order that's
@@ -156,9 +171,9 @@ same way a client would.
 
 Worth being straight about, because some of it matters:
 
-- **There's no risk layer.** No kill switch, no order-value cap, no position
-  limits. The model can place any order the schema allows. This is the biggest
-  gap and I know it.
+- **There's no risk layer beyond the on/off switch.** No order-value cap, no
+  position limits, no daily loss limit. With trading enabled, the model can
+  place any order the schema allows. This is the biggest gap and I know it.
 - **It's never run against a funded account.** Everything here is built against
   Kite Connect's documented v3 contract and verified against a local fake.
 - **`SL` and `SL-M` are offered but can't work** — they need a `trigger_price`
