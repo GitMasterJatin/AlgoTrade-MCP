@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-import { getHoldings, getPositions, placeOrder } from './trade';
+import { cancelOrder, getHoldings, getOrders, getPositions, placeOrder } from './trade';
 
 const server = new McpServer({ name: 'zerodha-trade', version: '1.0.0' });
 
@@ -77,6 +77,45 @@ server.registerTool(
 
         return {
             content: [{ type: 'text', text: JSON.stringify({ holdings, positions }) }],
+        };
+    },
+);
+
+server.registerTool(
+    'get_orders',
+    {
+        description:
+            "Lists today's orders on Zerodha with their status and fill quantity. " +
+            'Use this to find the order_id needed by cancel_order.',
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+    },
+    async () => {
+        const orders = await getOrders();
+
+        return {
+            content: [{ type: 'text', text: JSON.stringify(orders) }],
+        };
+    },
+);
+
+server.registerTool(
+    'cancel_order',
+    {
+        description:
+            'Cancels a pending order on Zerodha. Only works on orders that have not ' +
+            'filled yet - a filled order can only be reversed by an opposing order. ' +
+            'Use get_orders to find the order_id.',
+        inputSchema: z.object({
+            order_id: z.string(),
+        }),
+        annotations: { destructiveHint: true },
+    },
+    async ({ order_id }) => {
+        const result = await cancelOrder(order_id);
+
+        return {
+            content: [{ type: 'text', text: JSON.stringify(result) }],
         };
     },
 );
