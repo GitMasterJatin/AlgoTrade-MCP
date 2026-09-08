@@ -13,5 +13,9 @@
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "scripts": {
+    "start": "bun run index.ts",
+    "login": "bun run login.ts"
   }
 }
