@@ -52,6 +52,59 @@ function getClient(): Connect {
     return kc;
 }
 
+/**
+ * kiteconnect rejects with a plain `{message, error_type}` object rather than
+ * an Error. The MCP SDK stringifies non-Errors, so without this every broker
+ * failure reaches the model as "[object Object]".
+ */
+function toError(err: unknown): Error {
+    if (err instanceof Error) return err;
+    if (err && typeof err === "object") {
+        const { message, error_type } = err as { message?: string; error_type?: string };
+        if (message) return new Error(error_type ? `${error_type}: ${message}` : message);
+    }
+    return new Error(String(err));
+}
+
+/** Kite tags are alphanumeric, max 20 chars. This yields 17. */
+function newTag(): string {
+    return `mcp${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Runs a broker call, rethrowing its rejection as a real Error. */
+async function broker<T>(call: Promise<T>): Promise<T> {
+    try {
+        return await call;
+    } catch (err) {
+        throw toError(err);
+    }
+}
+
+/**
+ * Looks for an order carrying `tag`, retrying because the order book can lag a
+ * placement by a moment. Reports whether the book was read at all: "not in the
+ * book" and "could not read the book" are very different answers.
+ */
+async function findByTag(kc: Connect, tag: string, attempts = 3) {
+    let bookRead = false;
+
+    for (let i = 0; i < attempts; i++) {
+        if (i > 0) await sleep(500);
+        try {
+            const orders = await kc.getOrders();
+            bookRead = true;
+            const hit = orders.find((o) => o.tag === tag);
+            if (hit) return { hit, bookRead };
+        } catch {
+            // Keep trying: this lookup is the only way to resolve the ambiguity.
+        }
+    }
+
+    return { hit: undefined, bookRead };
+}
+
 export async function placeOrder({
     tradingsymbol,
     quantity,
@@ -61,7 +114,13 @@ export async function placeOrder({
     order_type = "MARKET",
     price,
 }: PlaceOrderInput) {
+    const kc = getClient();
+
+    // Stamped so a failed placement can be resolved against the order book.
+    const tag = newTag();
+
     const payload: Parameters<Connect["placeOrder"]>[1] = {
+        tag,
         exchange: exchange as Exchanges,
         tradingsymbol,
         transaction_type,
@@ -73,7 +132,36 @@ export async function placeOrder({
             : {}),
     };
 
-    return getClient().placeOrder("regular", payload);
+    try {
+        return { ...(await kc.placeOrder("regular", payload)), tag };
+    } catch (err) {
+        // The request failed, but it may still have reached the exchange. Never
+        // hand that ambiguity to the caller - resolve it against the tag.
+        const { hit, bookRead } = await findByTag(kc, tag);
+
+        if (hit) {
+            return {
+                order_id: hit.order_id,
+                tag,
+                status: hit.status,
+                note:
+                    "The placement request failed but the order DID reach Zerodha. " +
+                    "Do not retry.",
+            };
+        }
+
+        if (!bookRead) {
+            throw new Error(
+                `Order status UNKNOWN: placement failed (${toError(err).message}) and ` +
+                    `the order book could not be read to confirm. Check Zerodha for ` +
+                    `tag ${tag} before retrying.`,
+            );
+        }
+
+        throw new Error(
+            `Order was NOT placed (${toError(err).message}). Safe to retry.`,
+        );
+    }
 }
 
 /**
@@ -86,7 +174,7 @@ export async function placeOrder({
 const TERMINAL_STATUSES = new Set(["COMPLETE", "CANCELLED", "REJECTED"]);
 
 export async function getOrders() {
-    return getClient().getOrders();
+    return broker(getClient().getOrders());
 }
 
 export async function cancelOrder(orderId: string) {
@@ -95,7 +183,7 @@ export async function cancelOrder(orderId: string) {
     // Look the order up rather than trusting a caller-supplied variety: the
     // book also holds amo/co/iceberg orders placed outside this server, and
     // cancelling those with the wrong variety fails.
-    const order = (await kc.getOrders()).find((o) => o.order_id === orderId);
+    const order = (await broker(kc.getOrders())).find((o) => o.order_id === orderId);
     if (!order) {
         throw new Error(`No order ${orderId} in today's order book.`);
     }
@@ -111,7 +199,7 @@ export async function cancelOrder(orderId: string) {
         );
     }
 
-    await kc.cancelOrder(order.variety as Variety, orderId);
+    await broker(kc.cancelOrder(order.variety as Variety, orderId));
 
     return {
         order_id: orderId,
@@ -129,9 +217,9 @@ export async function cancelOrder(orderId: string) {
 }
 
 export async function getHoldings() {
-    return getClient().getHoldings();
+    return broker(getClient().getHoldings());
 }
 
 export async function getPositions() {
-    return getClient().getPositions();
+    return broker(getClient().getPositions());
 }
