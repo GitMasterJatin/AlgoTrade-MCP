@@ -44,6 +44,9 @@ export KITE_MAX_ORDER_VALUE=25000
 The default is deliberately small, so turning trading on without thinking about
 limits can't do much damage.
 
+Orders also need your explicit approval, one at a time. Set
+`KITE_REQUIRE_APPROVAL=false` only if you want the model trading unattended.
+
 Kite's login hands you a **request token** that works exactly once and expires
 in minutes, which you trade for an access token good until 6am the next day. So
 logging in is two steps:
@@ -85,7 +88,7 @@ Then point your MCP client at it:
 
 | Tool | What it does |
 |---|---|
-| `buy_stock` / `sell_stock` | Place an order. Market by default; CNC, MIS or NRML. Needs `KITE_TRADING_ENABLED=true`. |
+| `buy_stock` / `sell_stock` | Place an order. Needs `KITE_TRADING_ENABLED=true` and your approval. |
 | `cancel_order` | Cancel a pending order by id. |
 | `get_orders` | Today's order book, with status and fill quantity. |
 | `show_portfolio` | Holdings and positions. |
@@ -118,6 +121,38 @@ There's a fourth case, and keeping it separate is the whole point: if the order
 book itself can't be read, the server says **UNKNOWN** and hands you the tag to
 check by hand. It never guesses "not placed," because a live order reported as
 unplaced is the mistake that costs you money.
+
+### Getting a secret past the model
+
+Every order needs a human to approve it, which sounds simple until you notice
+the model is the only thing talking to this server. Any code handed back in a
+tool response, it can just read and echo. So the code never appears there.
+
+Ask for an order and nothing is placed. Instead the server writes this to its
+stderr and to `.pending-approval`, where you read it and the model can't:
+
+```
+=== APPROVAL REQUIRED ===
+BUY 10 INFY on NSE (MARKET, CNC)
+Estimated value: 1050
+Code: 88E6BEFF62
+Expires: 7:40:39 PM
+=========================
+```
+
+You tell the model the code, it calls again, the order goes through. The notice
+shows what you're approving rather than just a code, because an approval you
+can't read isn't one.
+
+The code is bound to a hash of that exact order — side, symbol, quantity,
+product, type, price. A code you gave for one share cannot be spent on a
+thousand, or on a different stock, or flipped from buy to sell. It works once,
+expires in five minutes, and is void if the price moved more than 2% since you
+looked, because an approval given at one price shouldn't execute at another.
+
+Worth being precise about what this covers: it stops the model *inventing* an
+approval. It does not stop a model that can read your filesystem some other way
+— through a filesystem MCP server running alongside, say. Narrow, but real.
 
 ### The value cap has to fail closed
 
@@ -181,7 +216,7 @@ reaching the model as `[object Object]`. They now carry the real reason.
 bun test
 ```
 
-39 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
+52 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
 Zerodha (`tests/helpers/fake-kite.ts`) that can be told to fail in specific
 ways, so the paths that are otherwise impossible to reach on purpose — a
 placement whose response is lost, an unreadable order book, an order that's
@@ -196,9 +231,11 @@ same way a client would.
 
 Worth being straight about, because some of it matters:
 
-- **Risk stops at the per-order level.** There's a kill switch and a value cap,
-  but no position limits, no daily loss limit, and nothing that looks at your
-  portfolio as a whole. Ten orders just under the cap are ten orders.
+- **Risk stops at the per-order level.** Approval, the kill switch and the cap
+  all judge one order at a time. There are no position limits, no daily loss
+  limit, and nothing that looks at your portfolio as a whole — ask for a lakh
+  spread over five stocks and nothing notices if the model picks fifteen. Each
+  one is a separate approval, so you'd see it, but the server wouldn't.
 - **It's never run against a funded account.** Everything here is built against
   Kite Connect's documented v3 contract and verified against a local fake.
 - **`SL` and `SL-M` are offered but can't work** — they need a `trigger_price`

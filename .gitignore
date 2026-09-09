@@ -35,3 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # kite session (contains a live access token)
 .kite-session.json
+
+# pending human approval (contains a live approval code)
+.pending-approval

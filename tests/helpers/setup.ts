@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -19,8 +19,20 @@ process.env.KITE_API_KEY = "fake-key";
 process.env.KITE_SESSION_FILE = session;
 process.env.KITE_API_ROOT = broker.root;
 process.env.KITE_TRADING_ENABLED = "true";
+process.env.KITE_APPROVAL_FILE = path.join(
+    mkdtempSync(path.join(tmpdir(), "kite-approval-")),
+    "pending",
+);
 
-export const { placeOrder, cancelOrder, getOrders } = await import("../../trade");
+export const { placeOrder, cancelOrder, getOrders, APPROVAL_FILE } = await import(
+    "../../trade"
+);
+
+/** Reads the approval code the server wrote out-of-band, the way a human would. */
+export function readApprovalCode(): string {
+    const notice = readFileSync(APPROVAL_FILE, "utf8");
+    return notice.match(/Code: ([0-9A-F]+)/)![1]!;
+}
 
 /**
  * Puts the broker and the environment back to a known state. Every test file
@@ -31,4 +43,6 @@ export function reset() {
     broker.reset();
     process.env.KITE_TRADING_ENABLED = "true";
     delete process.env.KITE_MAX_ORDER_VALUE;
+    // Most suites test something other than approval; they opt out explicitly.
+    process.env.KITE_REQUIRE_APPROVAL = "false";
 }

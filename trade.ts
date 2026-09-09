@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { KiteConnect } from "kiteconnect";
@@ -16,6 +17,8 @@ type PlaceOrderInput = {
     product?: ProductType;
     order_type?: OrderMode;
     price?: number;
+    /** Approval code, read by the human from the approval file or stderr. */
+    confirm?: string;
 };
 
 /** Where the access token lives. Override to keep it outside the repo. */
@@ -158,11 +161,12 @@ async function assertWithinValueCap(
     order: { exchange: string; tradingsymbol: string; quantity: number },
     orderType: OrderMode,
     price: number | undefined,
-) {
+): Promise<{ value: number; referencePrice?: number }> {
     const cap = maxOrderValue();
     const instrument = `${order.exchange}:${order.tradingsymbol}`;
     let unitPrice: number;
     let basis: string;
+    let referencePrice: number | undefined;
 
     if (orderType !== "MARKET" && price) {
         // A limit price is the most you would pay per share, so it is exact.
@@ -186,6 +190,7 @@ async function assertWithinValueCap(
         }
         unitPrice = lastPrice * SLIPPAGE_ALLOWANCE;
         basis = `last price ${lastPrice} plus 5% for slippage`;
+        referencePrice = lastPrice;
     }
 
     const value = unitPrice * order.quantity;
@@ -196,6 +201,143 @@ async function assertWithinValueCap(
                 "Raise KITE_MAX_ORDER_VALUE to allow it.",
         );
     }
+
+    return { value, referencePrice };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Human approval
+ *
+ * The model is the only thing talking to this server, so an approval code
+ * returned to it could simply be echoed back. The code therefore never appears
+ * in the tool response: it is written to stderr and to a file that the human
+ * reads directly. What the model gets back is "approval required, here is where
+ * to look".
+ *
+ * This defends against the model fabricating an approval. It does NOT defend
+ * against a model that can read the filesystem by some other route.
+ * ------------------------------------------------------------------------- */
+
+export const APPROVAL_FILE =
+    process.env.KITE_APPROVAL_FILE ?? path.join(import.meta.dir, ".pending-approval");
+
+const APPROVAL_TTL_MS = 5 * 60 * 1000;
+
+/** How far the market may move between approval and placement. */
+const APPROVAL_PRICE_BAND = 0.02;
+
+type PendingApproval = {
+    fingerprint: string;
+    expiresAt: number;
+    /** Last traded price when approval was asked for, if we looked it up. */
+    referencePrice?: number;
+};
+
+const pendingApprovals = new Map<string, PendingApproval>();
+
+function approvalRequired() {
+    return process.env.KITE_REQUIRE_APPROVAL !== "false";
+}
+
+/**
+ * Identifies the exact order being approved. Without this a code issued for
+ * "buy 1 INFY" could be spent on "buy 1000 RELIANCE".
+ */
+function orderFingerprint(o: {
+    transaction_type: OrderType;
+    exchange: string;
+    tradingsymbol: string;
+    quantity: number;
+    product: ProductType;
+    order_type: OrderMode;
+    price?: number;
+}) {
+    const canonical = [
+        o.transaction_type,
+        o.exchange,
+        o.tradingsymbol,
+        o.quantity,
+        o.product,
+        o.order_type,
+        o.price ?? "",
+    ].join("|");
+    return createHash("sha256").update(canonical).digest("hex");
+}
+
+function issueApproval(
+    summary: string,
+    fingerprint: string,
+    referencePrice: number | undefined,
+): void {
+    for (const [code, approval] of pendingApprovals) {
+        if (approval.expiresAt <= Date.now()) pendingApprovals.delete(code);
+    }
+
+    const code = randomBytes(5).toString("hex").toUpperCase();
+    const expiresAt = Date.now() + APPROVAL_TTL_MS;
+    pendingApprovals.set(code, { fingerprint, expiresAt, referencePrice });
+
+    // Deliberately shows WHAT is being approved, not just a code: an approval
+    // you cannot read is not an approval.
+    const notice =
+        `\n=== APPROVAL REQUIRED ===\n${summary}\n` +
+        `Code: ${code}\n` +
+        `Expires: ${new Date(expiresAt).toLocaleTimeString()}\n` +
+        `=========================\n`;
+
+    process.stderr.write(notice);
+    try {
+        writeFileSync(APPROVAL_FILE, notice, { mode: 0o600 });
+    } catch {
+        // stderr already carries it; a read-only directory must not block trading.
+    }
+}
+
+async function redeemApproval(
+    kc: Connect,
+    code: string,
+    fingerprint: string,
+    instrument: string,
+) {
+    const approval = pendingApprovals.get(code.trim().toUpperCase());
+
+    if (!approval) {
+        throw new Error("That approval code is not valid. No order was placed.");
+    }
+    if (approval.expiresAt <= Date.now()) {
+        pendingApprovals.delete(code.trim().toUpperCase());
+        throw new Error(
+            "That approval code has expired. Request a new one. No order was placed.",
+        );
+    }
+    if (approval.fingerprint !== fingerprint) {
+        throw new Error(
+            "That approval code was issued for a different order. No order was placed.",
+        );
+    }
+
+    // Prices move. An approval given on one price should not execute on another.
+    if (approval.referencePrice !== undefined) {
+        const now = (await broker(kc.getLTP(instrument)))[instrument]?.last_price;
+        if (now === undefined) {
+            throw new Error(
+                `Cannot re-check the price of ${instrument} before placing an ` +
+                    "approved order. No order was placed.",
+            );
+        }
+        const drift = Math.abs(now - approval.referencePrice) / approval.referencePrice;
+        if (drift > APPROVAL_PRICE_BAND) {
+            pendingApprovals.delete(code.trim().toUpperCase());
+            throw new Error(
+                `${instrument} moved ${(drift * 100).toFixed(1)}% since approval ` +
+                    `(${approval.referencePrice} to ${now}). No order was placed. ` +
+                    "Request a new approval.",
+            );
+        }
+    }
+
+    // Single use.
+    pendingApprovals.delete(code.trim().toUpperCase());
 }
 
 export async function placeOrder({
@@ -206,19 +348,48 @@ export async function placeOrder({
     product = "CNC",
     order_type = "MARKET",
     price,
+    confirm,
 }: PlaceOrderInput) {
     assertTradingEnabled();
 
     const kc = getClient();
 
-    // Both checks run before a tag exists, so a refused order leaves nothing
+    // Every check runs before a tag exists, so a refused order leaves nothing
     // to reconcile.
-    await assertWithinValueCap(
+    const { value, referencePrice } = await assertWithinValueCap(
         kc,
         { exchange, tradingsymbol, quantity },
         order_type,
         price,
     );
+
+    if (approvalRequired()) {
+        const fingerprint = orderFingerprint({
+            transaction_type,
+            exchange,
+            tradingsymbol,
+            quantity,
+            product,
+            order_type,
+            price,
+        });
+
+        if (!confirm) {
+            issueApproval(
+                `${transaction_type} ${quantity} ${tradingsymbol} on ${exchange} ` +
+                    `(${order_type}, ${product})\nEstimated value: ${Math.round(value)}`,
+                fingerprint,
+                referencePrice,
+            );
+            throw new Error(
+                "Approval required. No order was placed. A code was written to " +
+                    `${APPROVAL_FILE} and to this server's stderr - ask the user to ` +
+                    "read it and call again with that code as `confirm`.",
+            );
+        }
+
+        await redeemApproval(kc, confirm, fingerprint, `${exchange}:${tradingsymbol}`);
+    }
 
     // Stamped so a failed placement can be resolved against the order book.
     const tag = newTag();

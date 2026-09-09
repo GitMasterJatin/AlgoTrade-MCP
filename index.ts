@@ -9,7 +9,10 @@ const server = new McpServer({ name: 'zerodha-trade', version: '1.0.0' });
 server.registerTool(
     'buy_stock',
     {
-        description: 'Buy a stock on Zerodha',
+        description:
+            'Buy a stock on Zerodha. Requires human approval: call without ' +
+            '`confirm` first, then ask the user to read the approval code shown ' +
+            'in their terminal and call again with it. You cannot see the code.',
         inputSchema: z.object({
             tradingsymbol: z.string(),
             quantity: z.number().int().positive(),
@@ -17,10 +20,11 @@ server.registerTool(
             product: z.enum(['CNC', 'MIS', 'NRML']).default('CNC'),
             order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
             price: z.number().optional(),
+            confirm: z.string().optional(),
         }),
         annotations: { destructiveHint: true },
     },
-    async ({ tradingsymbol, quantity, exchange, product, order_type, price }) => {
+    async ({ tradingsymbol, quantity, exchange, product, order_type, price, confirm }) => {
         const result = await placeOrder({
             tradingsymbol,
             quantity,
@@ -29,6 +33,7 @@ server.registerTool(
             product,
             order_type,
             price,
+            confirm,
         });
 
         return {
@@ -40,7 +45,10 @@ server.registerTool(
 server.registerTool(
     'sell_stock',
     {
-        description: 'Sell a stock on Zerodha',
+        description:
+            'Sell a stock on Zerodha. Requires human approval: call without ' +
+            '`confirm` first, then ask the user to read the approval code shown ' +
+            'in their terminal and call again with it. You cannot see the code.',
         inputSchema: z.object({
             tradingsymbol: z.string(),
             quantity: z.number().int().positive(),
@@ -48,10 +56,11 @@ server.registerTool(
             product: z.enum(['CNC', 'MIS', 'NRML']).default('CNC'),
             order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
             price: z.number().optional(),
+            confirm: z.string().optional(),
         }),
         annotations: { destructiveHint: true },
     },
-    async ({ tradingsymbol, quantity, exchange, product, order_type, price }) => {
+    async ({ tradingsymbol, quantity, exchange, product, order_type, price, confirm }) => {
         const result = await placeOrder({
             tradingsymbol,
             quantity,
@@ -60,6 +69,7 @@ server.registerTool(
             product,
             order_type,
             price,
+            confirm,
         });
 
         return {
