@@ -1,44 +1,62 @@
+/**
+ * index.ts - the MCP server (entry point).
+ *
+ * Exposes Zerodha to an LLM (Claude) as three MCP tools:
+ *   buy_stock       place a BUY order   (Telegram approval if high-value)
+ *   sell_stock      place a SELL order  (Telegram approval if high-value)
+ *   show_portfolio  holdings + today's positions
+ *
+ * HOW A CALL FLOWS
+ *   1. Claude Desktop starts this file as a child process (stdio transport).
+ *   2. On startup it calls `tools/list`. The SDK answers with each tool's name,
+ *      description and a JSON Schema generated from the Zod schema. That is
+ *      all the model knows about a tool, so descriptions are written as
+ *      instructions to the model.
+ *   3. The model sends `tools/call`. Zod validates the arguments at runtime
+ *      BEFORE the handler runs.
+ *   4. The handler calls trade.ts. If that throws, the SDK turns it into a
+ *      result with `isError: true`, so the model sees a real failure.
+ *
+ * MULTI-STEP FLOWS: the server has no agent loop. Claude plans the steps
+ * itself. For "sell everything" it calls show_portfolio, reads the result,
+ * then calls sell_stock once per holding. Each tool just does one job.
+ */
 import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-import { cancelOrder, getHoldings, getOrders, getPositions, placeOrder } from './trade';
+import { getPortfolio, placeOrder } from './trade';
 
 const server = new McpServer({ name: 'zerodha-trade', version: '1.0.0' });
+
+/*
+ * Zod schema: runtime validation + the JSON Schema the model sees.
+ * TypeScript types disappear at runtime, and arguments from an LLM can't be
+ * trusted, so they are checked here. quantity rejects 0, -3, 2.5 and "two".
+ */
+const orderSchema = z.object({
+    tradingsymbol: z.string().describe('NSE trading symbol, e.g. INFY, HDFCBANK'),
+    quantity: z.number().int().positive(),
+});
+
+/* Tells the model it must expect a wait and must not retry after a "no". */
+const ORDER_RULES =
+    'This places a REAL order on NSE. Orders above the approval limit wait for ' +
+    'the user to tap Approve on Telegram (up to ~50s). If the order was rejected ' +
+    'or not approved, do not retry unless the user asks again.';
 
 server.registerTool(
     'buy_stock',
     {
-        description:
-            'Buy a stock on Zerodha. Requires human approval: call without ' +
-            '`confirm` first, then ask the user to read the approval code shown ' +
-            'in their terminal and call again with it. You cannot see the code.',
-        inputSchema: z.object({
-            tradingsymbol: z.string(),
-            quantity: z.number().int().positive(),
-            exchange: z.string().default('NSE'),
-            product: z.enum(['CNC', 'MIS', 'NRML']).default('CNC'),
-            order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
-            price: z.number().optional(),
-            confirm: z.string().optional(),
-        }),
-        annotations: { destructiveHint: true },
+        description: `Buy a stock on Zerodha. ${ORDER_RULES}`,
+        inputSchema: orderSchema,
     },
-    async ({ tradingsymbol, quantity, exchange, product, order_type, price, confirm }) => {
-        const result = await placeOrder({
-            tradingsymbol,
-            quantity,
-            transaction_type: 'BUY',
-            exchange,
-            product,
-            order_type,
-            price,
-            confirm,
-        });
+    async ({ tradingsymbol, quantity }) => {
+        const result = await placeOrder(tradingsymbol, quantity, 'BUY');
 
-        return {
-            content: [{ type: 'text', text: JSON.stringify(result) }],
-        };
+        // MCP results are a list of content blocks; JSON as text is easy for
+        // the model to read.
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     },
 );
 
@@ -46,93 +64,35 @@ server.registerTool(
     'sell_stock',
     {
         description:
-            'Sell a stock on Zerodha. Requires human approval: call without ' +
-            '`confirm` first, then ask the user to read the approval code shown ' +
-            'in their terminal and call again with it. You cannot see the code.',
-        inputSchema: z.object({
-            tradingsymbol: z.string(),
-            quantity: z.number().int().positive(),
-            exchange: z.string().default('NSE'),
-            product: z.enum(['CNC', 'MIS', 'NRML']).default('CNC'),
-            order_type: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M']).default('MARKET'),
-            price: z.number().optional(),
-            confirm: z.string().optional(),
-        }),
-        annotations: { destructiveHint: true },
+            `Sell a stock on Zerodha. ${ORDER_RULES} ` +
+            'To sell everything, call show_portfolio first and sell each holding.',
+        inputSchema: orderSchema,
     },
-    async ({ tradingsymbol, quantity, exchange, product, order_type, price, confirm }) => {
-        const result = await placeOrder({
-            tradingsymbol,
-            quantity,
-            transaction_type: 'SELL',
-            exchange,
-            product,
-            order_type,
-            price,
-            confirm,
-        });
-
-        return {
-            content: [{ type: 'text', text: JSON.stringify(result) }],
-        };
+    async ({ tradingsymbol, quantity }) => {
+        const result = await placeOrder(tradingsymbol, quantity, 'SELL');
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     },
 );
 
 server.registerTool(
     'show_portfolio',
     {
-        description: 'Shows my complete portfolio and positions in Zerodha',
+        description:
+            'Shows my Zerodha portfolio: holdings (delivered shares) and positions ' +
+            "(today's trades). Call this before selling so quantities are exact.",
         inputSchema: z.object({}),
-        annotations: { readOnlyHint: true },
     },
     async () => {
-        const [holdings, positions] = await Promise.all([getHoldings(), getPositions()]);
-
-        return {
-            content: [{ type: 'text', text: JSON.stringify({ holdings, positions }) }],
-        };
+        const portfolio = await getPortfolio();
+        return { content: [{ type: 'text', text: JSON.stringify(portfolio) }] };
     },
 );
 
-server.registerTool(
-    'get_orders',
-    {
-        description:
-            "Lists today's orders on Zerodha with their status and fill quantity. " +
-            'Use this to find the order_id needed by cancel_order.',
-        inputSchema: z.object({}),
-        annotations: { readOnlyHint: true },
-    },
-    async () => {
-        const orders = await getOrders();
-
-        return {
-            content: [{ type: 'text', text: JSON.stringify(orders) }],
-        };
-    },
-);
-
-server.registerTool(
-    'cancel_order',
-    {
-        description:
-            'Cancels a pending order on Zerodha. Only works on orders that have not ' +
-            'filled yet - a filled order can only be reversed by an opposing order. ' +
-            'Use get_orders to find the order_id.',
-        inputSchema: z.object({
-            order_id: z.string(),
-        }),
-        annotations: { destructiveHint: true },
-    },
-    async ({ order_id }) => {
-        const result = await cancelOrder(order_id);
-
-        return {
-            content: [{ type: 'text', text: JSON.stringify(result) }],
-        };
-    },
-);
-
+/*
+ * stdio transport: the client spawns this process and exchanges JSON-RPC 2.0
+ * messages over stdin/stdout. STDOUT IS THE PROTOCOL CHANNEL, so nothing in
+ * this server may console.log - it would corrupt the messages.
+ */
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);

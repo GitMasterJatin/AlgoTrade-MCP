@@ -1,252 +1,87 @@
 # AlgoTrade-MCP
 
-[![CI](https://github.com/GitMasterJatin/AlgoTrade-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/GitMasterJatin/AlgoTrade-MCP/actions/workflows/ci.yml)
+An MCP server that lets Claude trade on your Zerodha account in plain English,
+with **human-in-the-loop approval on Telegram** for high-value orders.
 
-An MCP server that lets a language model trade on your Zerodha account.
+```
+You:    "Sell everything I own"
+Claude: show_portfolio -> sell_stock(INFY, 8) -> sell_stock(ITC, 30)
+Phone:  🔔 APPROVAL REQUIRED  SELL 30 ITC ... ₹3150   [✅ Approve] [❌ Reject]
+```
 
-Five tools — buy, sell, cancel, and look at your orders and portfolio — over
-stdio, so any MCP client (Claude Desktop, Claude Code, your own) can drive a
-real brokerage account.
+## Tools
 
-Wiring a model to a trading API is about fifty lines. The rest of this repo is
-about what happens when that goes wrong, because when it does, it costs money.
+| Tool | What it does |
+|---|---|
+| `buy_stock` | Buy `quantity` shares of an NSE symbol (CNC, market order). |
+| `sell_stock` | Sell `quantity` shares of an NSE symbol (CNC, market order). |
+| `show_portfolio` | Holdings (delivered shares) and positions (today's trades). |
 
----
+Inputs are validated at runtime with **Zod**. The server talks to the client
+over **stdio** (Claude Desktop starts it as a child process).
+
+Claude chains the tools itself. For "sell everything" it reads
+`show_portfolio`, then calls `sell_stock` once per holding.
+
+## Human in the loop
+
+Orders worth more than `KITE_APPROVAL_LIMIT` (default ₹2,000, estimated from
+the last traded price) don't execute straight away. The server sends you a
+Telegram message with **Approve** and **Reject** buttons, and the tool call waits:
+
+- **Approve** -> the order is placed.
+- **Reject**, or **no tap within 50s** -> nothing is placed, and the model is
+  told not to retry.
+- Only your Telegram user id (`TELEGRAM_CHAT_ID`) can approve.
+- If Telegram isn't configured or can't be reached, the order is refused.
+
+This is enforced in the server, not the client, so no client setting and no
+model can skip it. See `approval.ts`.
 
 ## Setup
 
-You need [Bun](https://bun.com) and a Zerodha Kite Connect app for the API key
-and secret.
+You need [Bun](https://bun.com), a Zerodha Kite Connect app (API key + secret)
+and a Telegram bot from [@BotFather](https://t.me/BotFather).
 
 ```bash
 bun install
 export KITE_API_KEY=your_key
 export KITE_API_SECRET=your_secret
+export TELEGRAM_BOT_TOKEN=123456:ABC...
+export TELEGRAM_CHAT_ID=your_telegram_user_id   # message your bot, then see getUpdates -> from.id
+export KITE_APPROVAL_LIMIT=2000                 # optional; 0 = approve every order
 ```
 
-Orders are refused until you also set this:
+Log in once a day (Kite access tokens expire around 6 AM):
 
 ```bash
-export KITE_TRADING_ENABLED=true
+bun run login                   # prints the login URL
+bun run login <request_token>   # from the redirect URL; saves .kite-session.json
 ```
 
-It's off by default so an accidental run can't spend anything, and it's the
-switch to flip when something looks wrong. Reads and cancels keep working while
-it's off — the point is to stop new exposure, and not being able to close a
-position you already hold would be the wrong failure.
-
-Single orders are also capped, at ₹10,000 unless you say otherwise:
-
-```bash
-export KITE_MAX_ORDER_VALUE=25000
-```
-
-The default is deliberately small, so turning trading on without thinking about
-limits can't do much damage.
-
-Orders also need your explicit approval, one at a time. Set
-`KITE_REQUIRE_APPROVAL=false` only if you want the model trading unattended.
-
-Kite's login hands you a **request token** that works exactly once and expires
-in minutes, which you trade for an access token good until 6am the next day. So
-logging in is two steps:
-
-```bash
-bun run login
-```
-
-That prints a URL. Open it, log in, and Zerodha bounces you to a redirect
-carrying `?request_token=...` in the address bar. Copy that value:
-
-```bash
-bun run login <request_token>
-```
-
-The access token lands in `.kite-session.json` (gitignored, mode 600) and the
-server reuses it until Zerodha expires it. Set `KITE_SESSION_FILE` if you'd
-rather keep it somewhere outside the repo.
-
-Then point your MCP client at it:
+Add it to Claude Desktop (`claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "zerodha": {
-      "command": "bun",
+      "command": "/absolute/path/to/bun",
       "args": ["run", "/absolute/path/to/AlgoTrade-MCP/index.ts"],
       "env": {
         "KITE_API_KEY": "...",
-        "KITE_API_SECRET": "...",
-        "KITE_TRADING_ENABLED": "true"
+        "TELEGRAM_BOT_TOKEN": "...",
+        "TELEGRAM_CHAT_ID": "..."
       }
     }
   }
 }
 ```
 
-## The tools
+## Files
 
-| Tool | What it does |
+| File | Purpose |
 |---|---|
-| `buy_stock` / `sell_stock` | Place an order. Needs `KITE_TRADING_ENABLED=true` and your approval. |
-| `cancel_order` | Cancel a pending order by id. |
-| `get_orders` | Today's order book, with status and fill quantity. |
-| `show_portfolio` | Holdings and positions. |
-
-Buy, sell and cancel are tagged `destructiveHint` so a client can warn you
-before the model spends anything. Reads are tagged `readOnlyHint`.
-
----
-
-## The parts worth reading
-
-### A request that fails isn't the same as an order that didn't happen
-
-This is the one that actually matters.
-
-You POST an order. The connection dies. Did it go through? You genuinely don't
-know — Zerodha may have accepted it and lost the response on the way back. If
-you retry, you might just buy the stock twice.
-
-So every order goes out stamped with a unique tag. If the request fails, the
-server goes looking for that tag in the order book before it answers you, and
-retries the lookup a few times because the book takes a moment to catch up.
-You get one of three answers, never a shrug:
-
-- **placed** — here's the order id
-- **placed anyway** — the request failed, but the order is live. *Don't retry.*
-- **not placed** — with Zerodha's actual reason. Safe to retry.
-
-There's a fourth case, and keeping it separate is the whole point: if the order
-book itself can't be read, the server says **UNKNOWN** and hands you the tag to
-check by hand. It never guesses "not placed," because a live order reported as
-unplaced is the mistake that costs you money.
-
-### Getting a secret past the model
-
-Every order needs a human to approve it, which sounds simple until you notice
-the model is the only thing talking to this server. Any code handed back in a
-tool response, it can just read and echo. So the code never appears there.
-
-Ask for an order and nothing is placed. Instead the server writes this to its
-stderr and to `.pending-approval`, where you read it and the model can't:
-
-```
-=== APPROVAL REQUIRED ===
-BUY 10 INFY on NSE (MARKET, CNC)
-Estimated value: 1050
-Code: 88E6BEFF62
-Expires: 7:40:39 PM
-=========================
-```
-
-You tell the model the code, it calls again, the order goes through. The notice
-shows what you're approving rather than just a code, because an approval you
-can't read isn't one.
-
-The code is bound to a hash of that exact order — side, symbol, quantity,
-product, type, price. A code you gave for one share cannot be spent on a
-thousand, or on a different stock, or flipped from buy to sell. It works once,
-expires in five minutes, and is void if the price moved more than 2% since you
-looked, because an approval given at one price shouldn't execute at another.
-
-Worth being precise about what this covers: it stops the model *inventing* an
-approval. It does not stop a model that can read your filesystem some other way
-— through a filesystem MCP server running alongside, say. Narrow, but real.
-
-### The value cap has to fail closed
-
-A limit order carries its own price, so capping it is arithmetic. A market
-order doesn't, so it's valued off the last traded price — plus 5%, because a
-market order can fill worse than the last trade and the estimate should err
-towards refusing.
-
-The part that matters is what happens when that price lookup fails. The order
-is refused. A cap that quietly switches itself off the moment a quote is
-unavailable isn't a cap, and "the market data feed is having a bad minute" is
-exactly when you'd rather not be sending orders anyway.
-
-It applies to sells too. An oversized sell is the same fat finger, and unlike
-the kill switch this is a standing config you size to your account once, not an
-emergency lever you reach for mid-incident.
-
-### Cancelling is not one endpoint
-
-Kite cancels at `/orders/{variety}/{order_id}`, and *variety* isn't always
-`regular` — an after-market order is `amo`, a cover order is `co`. Your book
-holds orders you placed from the Kite app too.
-
-Hardcoding `regular` silently fails to cancel half of them. Asking the model to
-supply the variety is asking it to guess. So `cancel_order` takes only an
-order id, looks the order up, and uses whatever variety it actually has.
-
-And if the order was **partly filled**, cancelling only kills the remainder.
-Cancel 100 shares that already filled 40 and you still own 40. A bare "success"
-here would leave you thinking you were flat, so the result says so plainly.
-
-Orders that are already `COMPLETE`, `CANCELLED` or `REJECTED` are refused
-before Zerodha is called at all — and a filled order gets told what it actually
-needs, which is an opposing order, not a cancel. Otherwise a model reads
-"cancel failed" and tries again forever.
-
-That check is a denylist of those three, not an allowlist of cancellable ones.
-Kite's docs say its status vocabulary is open-ended, and an allowlist would
-quietly start refusing real cancels the first time they added a state.
-
-### Errors have to look like errors
-
-Two things were quietly swallowing failures.
-
-The MCP SDK already turns a thrown error into a proper `isError` result — so
-the try/catch blocks wrapping every call were *downgrading* real failures into
-ordinary-looking success. A model can't tell "order rejected" from "order
-filled" if both come back the same shape, and it will retry a buy that already
-went through. Those blocks are gone rather than patched.
-
-The other one: `kiteconnect` rejects with a plain `{ message, error_type }`
-object instead of an `Error`, and the SDK stringifies anything that isn't an
-Error. Every broker failure — bad symbol, expired token, rejected order — was
-reaching the model as `[object Object]`. They now carry the real reason.
-
----
-
-## Tests
-
-```bash
-bun test
-```
-
-52 tests, no live account needed. `KITE_API_ROOT` points the client at a fake
-Zerodha (`tests/helpers/fake-kite.ts`) that can be told to fail in specific
-ways, so the paths that are otherwise impossible to reach on purpose — a
-placement whose response is lost, an unreadable order book, an order that's
-half filled — are all covered.
-
-The MCP tests skip the internals and drive the actual server over stdio, the
-same way a client would.
-
----
-
-## What this doesn't do
-
-Worth being straight about, because some of it matters:
-
-- **Risk stops at the per-order level.** Approval, the kill switch and the cap
-  all judge one order at a time. There are no position limits, no daily loss
-  limit, and nothing that looks at your portfolio as a whole — ask for a lakh
-  spread over five stocks and nothing notices if the model picks fifteen. Each
-  one is a separate approval, so you'd see it, but the server wouldn't.
-- **It's never run against a funded account.** Everything here is built against
-  Kite Connect's documented v3 contract and verified against a local fake.
-- **`SL` and `SL-M` are offered but can't work** — they need a `trigger_price`
-  that isn't in the schema yet.
-- `LIMIT` orders default to price 0 if you don't pass one, which Zerodha will
-  reject.
-- One tag per attempt means this survives a dropped connection, not a model
-  that decides to call `buy_stock` twice. That needs a confirmation step, which
-  is a different problem.
-
-If you want the version of this with the safety architecture taken seriously —
-a non-bypassable risk gate, single-use approval tokens, an outbox and a
-reconciler — that's [kite-agent](https://github.com/GitMasterJatin/kite-agent).
-This repo is the small, sharp version of the same idea.
+| `index.ts` | MCP server: tool definitions, Zod schemas, stdio transport |
+| `trade.ts` | Kite Connect calls: price, approve if high-value, place; portfolio |
+| `approval.ts` | Telegram approval: send buttons, long-poll for the tap, timeout |
+| `login.ts` | Daily Kite login: request token -> access token |

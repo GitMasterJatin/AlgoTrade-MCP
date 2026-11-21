@@ -6,8 +6,6 @@
   "scripts": {
     "start": "bun run index.ts",
     "login": "bun run login.ts",
-    "demo": "bun run demo.ts",
-    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
